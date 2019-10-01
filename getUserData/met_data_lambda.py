@@ -1,21 +1,26 @@
 import boto3
 import json
+import time
 
 
 def get_message_from_queue(event, context):
     dynamodb = boto3.resource('dynamodb')
-    table = dynamodb.Table('Met_Test')
+    table = dynamodb.Table('Test-Table-Project-Eimantas')
     sqs = boto3.resource('sqs')
-    queue = sqs.Queue('https://sqs.eu-west-2.amazonaws.com/998292383020/test-mustang-queue')
-    resp = queue.receive_messages()
-
+    queue = sqs.Queue('https://sqs.eu-west-2.amazonaws.com/998292383020/Taining-Queue-Eimantas')
+    resp = queue.receive_messages(MaxNumberOfMessages=1)
     if bool(resp) is True:
         for obj in resp:
-            print("Test")
+            ttl = 259200 + int(time.time())
+
             new_obj = json.loads(obj.body)
-            new_dict = {'Message_Id': new_obj['MessageId']}
-            for key, val in new_obj['MessageAttributes'].items():
-                new_dict[key] = val['Value']
+            new_msg = json.loads(new_obj['Message'])
+            new_dict = {'Message_Id': new_obj['MessageId'],
+                        'forecast_reference_time': new_msg['forecast_reference_time'],
+                        'model': new_msg['model'],
+                        'name': new_msg['name'],
+                        'ttl': ttl
+                        }
             entries = table.put_item(Item=new_dict)
     else:
         print("No Messages in Queue")
