@@ -1,0 +1,293 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Resources:
+  RootRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSLambdaFullAccess
+        - arn:aws:iam::aws:policy/AmazonSQSFullAccess
+
+  APIRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+                - apigateway.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSLambdaFullAccess
+        - arn:aws:iam::aws:policy/AmazonAPIGatewayInvokeFullAccess
+
+  MainBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: "eimantas-training-project"
+
+  QueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      PolicyDocument:
+        {
+          "Version": "2012-10-17",
+          "Id": "UseCase2",
+          "Statement": [{
+                          "Sid": "1",
+                          "Effect": "Allow",
+                          "Action": [
+                            "sqs:*",
+                            "sqs:ReceiveMessage"
+                          ],
+                          "Resource": !GetAtt TestProjectQueue.Arn
+                        }]
+        }
+      Queues:
+        - !Ref TestProjectQueue
+
+  TestProjectQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: "Taining-Queue-Eimantas"
+
+  SnsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: sqs
+      Endpoint: !GetAtt TestProjectQueue.Arn
+      Region: "eu-west-2"
+      TopicArn: "arn:aws:sns:eu-west-2:021908831235:aws-earth-mo-atmospheric-ukv-prd"
+
+  LambdaSQSLink:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt TestProjectQueue.Arn
+      FunctionName: !Ref QueueLambda
+
+  QueueLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: !Sub |
+          import boto3
+          import json
+          import time
+
+          def get_message_from_queue(event, context):
+            dynamodb = boto3.resource('dynamodb')
+            table = dynamodb.Table('Test-Table-Project-Eimantas')
+            sqs = boto3.resource('sqs')
+            queue = sqs.Queue('https://sqs.eu-west-2.amazonaws.com/998292383020/Taining-Queue-Eimantas')
+            resp = queue.receive_messages(MaxNumberOfMessages=1)
+            if bool(resp) is True:
+              for obj in resp:
+                ttl = 259200 + int(time.time())
+
+                new_obj = json.loads(obj.body)
+                new_msg = json.loads(new_obj['Message'])
+                new_dict = {'Message_Id': new_obj['MessageId'],
+                  'forecast_reference_time': new_msg['forecast_reference_time'],
+                  'model': new_msg['model'],
+                  'name': new_msg['name'],
+                  'key': new_msg['key'],
+                  'ttl': ttl
+              }
+                entries = table.put_item(Item=new_dict)
+            else:
+              print("No Messages in Queue")
+              exit()
+      Handler: index.get_message_from_queue
+      Role: !GetAtt RootRole.Arn
+      Runtime: "python3.7"
+
+  APIFileDownloadLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: !Sub |
+          import boto3
+          import botocore
+          import json
+
+          def file_download_lambda(event, context):
+              dynamodb = boto3.resource('dynamodb')
+              table = dynamodb.Table('Test-Table-Project-Eimantas')
+
+              # Getting path parameter from json into string
+              pathPar = json.dumps(event['pathParameters'])
+              strPar = json.loads(pathPar)
+              resp = strPar['messageID']
+
+              dbResp = table.get_item(
+                  Key={
+                      'Message_Id': resp
+                  }
+              )
+              key = dbResp['Item']['key']
+
+              s3 = boto3.resource('s3')
+              output = "/tmp/"+ key
+
+              try:
+                  s3.Bucket('aws-earth-mo-atmospheric-ukv-prd').download_file(key, output)
+              except botocore.exceptions.ClientError as e:
+                  if e.response['Error']['Code'] == "404":
+                      print("The object does not exist.")
+                  else:
+                      raise
+
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({
+                      "Message_Id": dbResp['Item']['Message_Id'],
+                      "forecast_reference_time": dbResp['Item']['forecast_reference_time'],
+                      "model": dbResp['Item']['model'],
+                      "name": dbResp['Item']['name']
+                  })
+              }
+      Handler: index.file_download_lambda
+      Role: !GetAtt APIRole.Arn
+      Runtime: "python3.7"
+
+  APIRootLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: !Sub |
+          import boto3
+          import json
+
+          def api_root_lambda(event, context):
+              dynamodb = boto3.resource('dynamodb')
+              table = dynamodb.Table('Test-Table-Project-Eimantas')
+              pathPar = json.dumps(event['pathParameters'])
+              newPar = json.loads(pathPar)
+
+              dbResp = table.scan(
+                  AttributesToGet=[
+                      'Message_Id', 'forecast_reference_time', 'key', 'model', 'name'],
+                  Limit=10,
+                  Select='SPECIFIC_ATTRIBUTES'
+              )
+
+              return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                      "Items": dbResp['Items'],
+                      "LastEvaluatedKey": dbResp['LastEvaluatedKey']['Message_Id']
+                      })
+              }
+      Handler: index.api_root_lambda
+      Role: !GetAtt APIRole.Arn
+      Runtime: "python3.7"
+
+  DynamoTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        -
+          AttributeName: "Message_Id"
+          AttributeType: "S"
+      KeySchema:
+        -
+          AttributeName: "Message_Id"
+          KeyType: "HASH"
+      TableName: "Test-Table-Project-Eimantas"
+      ProvisionedThroughput:
+        ReadCapacityUnits: "5"
+        WriteCapacityUnits: "5"
+
+  apiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: "eimantas-api"
+
+  ItemsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt apiGateway.RootResourceId
+      RestApiId: !Ref apiGateway
+      PathPart: 'Items'
+
+  MessageID:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref apiGateway
+      ParentId: !Ref ItemsResource
+      PathPart: '{messageID+}'
+
+  apiItemsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      HttpMethod: GET
+      ResourceId: !Ref ItemsResource
+      RestApiId: !Ref apiGateway
+      AuthorizationType: NONE
+      Integration:
+        Credentials: !GetAtt APIRole.Arn
+        IntegrationHttpMethod: GET
+        Type: AWS_PROXY
+        Uri: !Sub
+          - 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${APIRootLambda}/invocations'
+          - APIRootLambda: !GetAtt APIRootLambda.Arn
+
+  apiMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref apiGateway
+      ResourceId: !Ref MessageID
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Credentials: !GetAtt APIRole.Arn
+        IntegrationHttpMethod: GET
+        Type: AWS_PROXY
+        Uri: !Sub
+          - 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${APIFileDownloadLambda}/invocations'
+          - APIFileDownloadLambda: !GetAtt APIFileDownloadLambda.Arn
+
+  lambdaDownloadApiGatewayInvoke:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !GetAtt APIRootLambda.Arn
+      Principal: "apigateway.amazonaws.com"
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${apiGateway}/*/GET/"
+
+  lambdaRootApiGatewayInvoke:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !GetAtt APIFileDownloadLambda.Arn
+      Principal: "apigateway.amazonaws.com"
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${apiGateway}/*/GET/"
+
+  apiDeployment:
+    DependsOn:
+      - apiMethod
+      - apiItemsMethod
+    Type: AWS::ApiGateway::Deployment
+    Properties:
+      RestApiId: !Ref apiGateway
+      StageName: Prod
+
+
+
+
+

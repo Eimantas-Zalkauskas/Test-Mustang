@@ -19,6 +19,7 @@ def get_message_from_queue(event, context):
                         'forecast_reference_time': new_msg['forecast_reference_time'],
                         'model': new_msg['model'],
                         'name': new_msg['name'],
+                        'key': new_msg['key'],
                         'ttl': ttl
                         }
             entries = table.put_item(Item=new_dict)
