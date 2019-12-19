@@ -2,6 +2,7 @@ import boto3
 import botocore
 import json
 
+
 def file_download_lambda(event, context):
     dynamodb = boto3.resource('dynamodb')
     table = dynamodb.Table('Test-Table-Project-Eimantas')

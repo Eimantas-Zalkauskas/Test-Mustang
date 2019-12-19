@@ -5,8 +5,6 @@ import json
 def api_root_lambda(event, context):
     dynamodb = boto3.resource('dynamodb')
     table = dynamodb.Table('Test-Table-Project-Eimantas')
-    pathPar = json.dumps(event['pathParameters'])
-    newPar = json.loads(pathPar)
 
     dbResp = table.scan(
         AttributesToGet=[
